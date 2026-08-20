@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <time.h>
+#include <math.h>
 
 #define WIDTH 1024
 #define HEIGHT 1024
@@ -86,35 +87,41 @@ typedef struct {
 } point3i;
 
 typedef struct {
+    float x;
+    float y;
+    float z;
+} point3f;
+
+typedef struct {
     point2i a;
     point2i b;
     point2i c;
 } triangle;
 
 int create_display(display* disp, int w, int h) {
-    char *mem = malloc(sizeof(pixel*) * h + sizeof(pixel) * w * h);
+    pixel** data = malloc(sizeof(pixel*) * h + sizeof(pixel) * w * h);
+    if(!data) return 0;
 
-    if(!mem) return 0;
-
-    disp->data = (pixel**)mem;
+    disp->data = data;
     disp->w = w;
     disp->h = h;
 
-    pixel *pixels = (pixel*)(mem + sizeof(pixel*) * h);
+    pixel* pixels = (pixel*)(data + h);  
+    
     for(int i = 0; i < h; ++i) {
-        disp->data[i] = pixels + i*w;
+        data[i] = pixels + i * w;
     }
 
-    for (int i = 0; i < h; i++) {
-        for (int j = 0; j < w; j++) {
-            disp->data[i][j] = COLORS[COLOR_BLACK];
+    for(int i = 0; i < h; ++i) {
+        for(int j = 0; j < w; ++j) {
+            data[i][j] = COLORS[COLOR_BLACK];
         }
     }
     
     return 1;
 }
 
-int from_obj(const char* filename, point3i* vertex_buff, size_t* v_size, uint32_t* index_buff, size_t* i_size) {
+int from_obj(const char* filename, point3f** vertex_buff, size_t* v_size, uint32_t** index_buff, size_t* i_size) {
     FILE* file = fopen(filename, "r");
 
     if(!file) {
@@ -126,7 +133,7 @@ int from_obj(const char* filename, point3i* vertex_buff, size_t* v_size, uint32_
     *v_size = 0;
     *i_size = 0;
 
-    char line[512];
+    char line[64];
     while(fgets(line, sizeof(line), file)) {
         if(*line == 'v')
             (*v_size)++;
@@ -137,17 +144,59 @@ int from_obj(const char* filename, point3i* vertex_buff, size_t* v_size, uint32_
     printf("Vertex count: %lu\n", *v_size);
     printf("Index count: %lu\n", *i_size);
 
+    point3f* vertex_buff_ptr = (point3f*)malloc(*v_size * sizeof(point3f));
+    uint32_t* index_buff_ptr = (uint32_t*)malloc(*i_size * 3 * sizeof(uint32_t));
+
+    if(!vertex_buff_ptr || !index_buff_ptr) {
+        fclose(file);
+        return 0;
+    }
+
+    rewind(file);
+    *vertex_buff = vertex_buff_ptr;
+    *index_buff = index_buff_ptr;
+
+    while(fgets(line, sizeof(line), file)) {
+        if(*line == '#')
+            continue;
+
+        if(*line == 'v') {
+            sscanf(line, "v %f %f %f", &vertex_buff_ptr->x, &vertex_buff_ptr->y, &vertex_buff_ptr->z);
+            vertex_buff_ptr++;
+        }
+
+        else if(*line == 'f') {
+            uint32_t a, b, c;
+            sscanf(line, "f %u %u %u", &a, &b, &c);
+            index_buff_ptr[0] = a - 1;
+            index_buff_ptr[1] = b - 1;
+            index_buff_ptr[2] = c - 1;
+            index_buff_ptr += 3;
+        }
+    }
+
+    // check
+    // for(int i = 0; i < *v_size; ++i) {
+    //     puts("Parsed vertices:");
+    //     printf("v%d: %f %f %f\n", i, vertex_buff[i].x, vertex_buff[i].y, vertex_buff[i].z);
+    // }
+
     fclose(file);
+    return 1;
 }
 
 int to_bmp(display* disp, const char* filename) {
-
     FILE* file = fopen(filename, "wb");
-
     if(!file) return 0;
 
     unsigned char header[54] = {
-        0x42, 0x4D // BM
+        0x42, 0x4D, 0, 0, 0, 0, 0, 0, 0, 0,
+        54, 0, 0, 0, 40, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        1, 0, 24, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0
     };
 
     int rowSize = (disp->w * 3 + 3) & ~3;
@@ -155,28 +204,34 @@ int to_bmp(display* disp, const char* filename) {
     int fileSize = 54 + imageSize;
 
     *(int*)&header[2] = fileSize;
-    *(int*)&header[10] = 54;
-    *(int*)&header[14] = 40;
     *(int*)&header[18] = disp->w;
     *(int*)&header[22] = disp->h;
-    *(short*)&header[26] = 1;
-    *(short*)&header[28] = 24;
     *(int*)&header[34] = imageSize;
 
     fwrite(header, 54, 1, file);
 
-    unsigned char pad[3] = {0};
+    int padding = rowSize - disp->w * 3;
+    
+    if (padding < 0 || padding > 3) {
+        printf("ERROR: Invalid padding %d for width %d\n", padding, disp->w);
+        fclose(file);
+        return 0;
+    }
+
     for (int y = disp->h - 1; y >= 0; --y) {
         for (int x = 0; x < disp->w; ++x) {
             fputc(disp->data[y][x].b, file);
             fputc(disp->data[y][x].g, file);
             fputc(disp->data[y][x].r, file);
         }
-
-        fwrite(pad, rowSize - disp->w * 3, 1, file);
+        
+        for (int p = 0; p < padding; p++) {
+            fputc(0, file);
+        }
     }
 
     fclose(file);
+    printf("BMP saved: %s (%dx%d)\n", filename, disp->w, disp->h);
     return 1;
 }
 
@@ -191,6 +246,9 @@ point2i sub(const point2i* v1, const point2i* v2) {
 int random_range(int a, int b) {
     return a + rand() % (b - a + 1);
 }
+
+int min(int a, int b) { return a < b ? a : b; }
+int max(int a, int b) { return a > b ? a : b; }
 
 void create_random_trs(point2i* vertices, uint32_t* indices, size_t count) {
     for(size_t i = 0; i < 3*count; i+=3) {
@@ -265,6 +323,29 @@ void renderer(display* disp, const point2i* vertices, const uint32_t* indices, s
 
 }
 
+void vertex_operations(point3f* vertex_buff, size_t v_size, point2i** vertex_screen, int width, int height) {
+    *vertex_screen = (point2i*)malloc(sizeof(point2i) * v_size);
+
+    if(!*vertex_screen) return;
+
+    // Projection params
+    float fov = 60.0f * M_PI / 180.0f;
+    float focal_length = 1.0f / tanf(fov / 2.0f);
+
+    float scale = 1.0f;
+
+    for(size_t i = 0; i < v_size; ++i) {
+        point3f v = vertex_buff[i];
+
+        // translation
+        v.z = -focal_length / scale;
+
+        // screen space
+        (*vertex_screen)[i].x = (int)((v.x / v.z) * focal_length * height/2 + width/2);
+        (*vertex_screen)[i].y = (int)((v.y / v.z) * focal_length * height/2 + height/2);
+    }
+}
+
 int main(int argc, char** argv) {
     srand(time(NULL));
 
@@ -274,12 +355,22 @@ int main(int argc, char** argv) {
     
     printf("Display created W: %d, H: %d\n", disp.w, disp.h);
 
-    point3i* vbo = NULL;
+    point3f* vbo = NULL;
     size_t vbo_size = 0;
     uint32_t* ebo = NULL;
     size_t ebo_size = 0;
 
-    from_obj("triangle.obj", vbo, &vbo_size, ebo, &ebo_size);
+
+    if(from_obj("triangle.obj", &vbo, &vbo_size, &ebo, &ebo_size)) {
+        point2i* tris_2d = NULL;
+
+        vertex_operations(vbo, vbo_size, &tris_2d, disp.w, disp.h);
+        renderer(&disp, tris_2d, ebo, ebo_size);
+        free(tris_2d);
+    }
+
+    free(vbo);
+    free(ebo);
 
     // #define TRI_COUNT 1000
     // printf("Triangles count %d\n", TRI_COUNT);
@@ -288,11 +379,8 @@ int main(int argc, char** argv) {
 
     // create_random_trs(vertices, indices, TRI_COUNT);
 
-    // renderer(&disp, vertices, indices, TRI_COUNT);
+    //renderer(&disp, vertices, indices, TRI_COUNT);
 
-
-
-    printf("render: OK", disp.w, disp.h);
 
     if(argc == 2) {
         to_bmp(&disp, argv[1]);
